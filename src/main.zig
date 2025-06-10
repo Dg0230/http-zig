@@ -1,6 +1,6 @@
 const std = @import("std");
-const HttpServer = @import("server.zig").HttpServer;
-const ServerConfig = @import("server.zig").ServerConfig;
+const HttpEngine = @import("http_engine.zig").HttpEngine;
+const HttpConfig = @import("config.zig").HttpConfig;
 const Context = @import("context.zig").Context;
 const loggerMiddleware = @import("middleware.zig").loggerMiddleware;
 const corsMiddleware = @import("middleware.zig").corsMiddleware;
@@ -15,36 +15,36 @@ pub fn main() !void {
 
     std.debug.print("启动 Zig HTTP 服务器...\n", .{});
 
-    // 服务器配置
-    const config = ServerConfig{
+    const config = HttpConfig{
         .port = 8080,
-        // .address = "127.0.0.1",
+        .address = "127.0.0.1",
         .max_connections = 1000,
         .read_timeout_ms = 5000,
         .write_timeout_ms = 5000,
-        // .buffer_size = 8192,
+        .buffer_size = 8192,
+        .max_buffers = 200,
     };
 
-    var server = try HttpServer.initWithConfig(allocator, config);
-    defer server.deinit();
+    var engine = try HttpEngine.initWithConfig(allocator, config);
+    defer engine.deinit();
 
-    // 添加全局中间件
-    try server.use(loggerMiddleware);
-    try server.use(corsMiddleware);
-    try server.use(errorHandlerMiddleware);
-    try server.use(requestIdMiddleware);
+    // 中间件
+    try engine.use(loggerMiddleware);
+    try engine.use(corsMiddleware);
+    try engine.use(errorHandlerMiddleware);
+    try engine.use(requestIdMiddleware);
 
-    // 设置路由
-    _ = try server.get("/", handleHome);
-    _ = try server.get("/hello", handleHello);
-    _ = try server.post("/echo", handleEcho);
+    // 基础路由
+    try engine.get("/", handleHome);
+    try engine.get("/hello", handleHello);
+    try engine.post("/echo", handleEcho);
 
     // API 路由组
-    const api_group = try server.group("/api");
+    const api_group = try engine.group("/api");
     _ = try api_group.get("/info", handleApiInfo);
     _ = try api_group.get("/time", handleApiTime);
 
-    // 用户 API 路由组
+    // 用户 API
     const users_group = try api_group.group("/users");
     _ = try users_group.get("/", handleListUsers);
     _ = try users_group.get("/:id", handleGetUser);
@@ -52,15 +52,11 @@ pub fn main() !void {
     _ = try users_group.put("/:id", handleUpdateUser);
     _ = try users_group.delete("/:id", handleDeleteUser);
 
-    // 静态文件路由
-    _ = try server.get("/static/*", handleStaticFiles);
-    // 注意：中间件应该在路由定义之前添加到服务器
-
     // 启动服务器
-    try server.listen("127.0.0.1", 8080);
+    std.debug.print("🚀 服务器启动中，地址: {s}:{d}\n", .{ engine.getConfig().address, engine.getConfig().port });
+    try engine.listen();
 }
 
-// 首页处理函数
 fn handleHome(ctx: *Context) !void {
     try ctx.html(
         \\<!DOCTYPE html>
@@ -104,7 +100,6 @@ fn handleHome(ctx: *Context) !void {
     );
 }
 
-// Hello API 处理函数
 fn handleHello(ctx: *Context) !void {
     const timestamp = std.time.timestamp();
     const json_response = try std.fmt.allocPrint(ctx.allocator, "{{\"message\":\"Hello from Zig HTTP Server!\",\"timestamp\":{d}}}", .{timestamp});
@@ -113,7 +108,6 @@ fn handleHello(ctx: *Context) !void {
     try ctx.json(json_response);
 }
 
-// Echo 服务处理函数
 fn handleEcho(ctx: *Context) !void {
     if (ctx.request.body) |body| {
         try ctx.text(body);
@@ -122,7 +116,6 @@ fn handleEcho(ctx: *Context) !void {
     }
 }
 
-// API 信息处理函数
 fn handleApiInfo(ctx: *Context) !void {
     const info = try std.fmt.allocPrint(ctx.allocator, "{{\"server\":\"Zig HTTP Server\",\"version\":\"1.0.0\",\"language\":\"Zig\",\"author\":\"Zig Developer\"}}", .{});
     defer ctx.allocator.free(info);
@@ -130,7 +123,6 @@ fn handleApiInfo(ctx: *Context) !void {
     try ctx.json(info);
 }
 
-// API 时间处理函数
 fn handleApiTime(ctx: *Context) !void {
     const timestamp = std.time.timestamp();
     const time_json = try std.fmt.allocPrint(ctx.allocator, "{{\"timestamp\":{d},\"iso\":\"2023-01-01T00:00:00Z\"}}", .{timestamp});
@@ -139,7 +131,6 @@ fn handleApiTime(ctx: *Context) !void {
     try ctx.json(time_json);
 }
 
-// 模拟用户数据
 const User = struct {
     id: u32,
     name: []const u8,
@@ -152,7 +143,6 @@ const users = [_]User{
     .{ .id = 3, .name = "王五", .email = "wangwu@example.com" },
 };
 
-// 列出所有用户
 fn handleListUsers(ctx: *Context) !void {
     var users_json = std.ArrayList(u8).init(ctx.allocator);
     defer users_json.deinit();
@@ -175,7 +165,6 @@ fn handleListUsers(ctx: *Context) !void {
     try ctx.json(users_json.items);
 }
 
-// 获取单个用户
 fn handleGetUser(ctx: *Context) !void {
     const id_str = ctx.getParam("id") orelse {
         ctx.status(.bad_request);
@@ -189,7 +178,6 @@ fn handleGetUser(ctx: *Context) !void {
         return;
     };
 
-    // 查找用户
     for (users) |user| {
         if (user.id == id) {
             const user_json = try std.fmt.allocPrint(ctx.allocator, "{{\"id\":{d},\"name\":\"{s}\",\"email\":\"{s}\"}}", .{ user.id, user.name, user.email });
@@ -200,12 +188,10 @@ fn handleGetUser(ctx: *Context) !void {
         }
     }
 
-    // 用户未找到
     ctx.status(.not_found);
     try ctx.json("{\"error\":\"User not found\"}");
 }
 
-// 创建用户（模拟）
 fn handleCreateUser(ctx: *Context) !void {
     if (ctx.request.body == null) {
         ctx.status(.bad_request);
@@ -213,10 +199,7 @@ fn handleCreateUser(ctx: *Context) !void {
         return;
     }
 
-    // 简化实现，实际应该解析 JSON
     std.debug.print("创建用户: {s}\n", .{ctx.request.body.?});
-
-    // 模拟创建成功
     const response = try std.fmt.allocPrint(ctx.allocator, "{{\"id\":{d},\"message\":\"用户创建成功\"}}", .{users.len + 1});
     defer ctx.allocator.free(response);
 
@@ -224,7 +207,6 @@ fn handleCreateUser(ctx: *Context) !void {
     try ctx.json(response);
 }
 
-// 更新用户（模拟）
 fn handleUpdateUser(ctx: *Context) !void {
     const id_str = ctx.getParam("id") orelse {
         ctx.status(.bad_request);
@@ -238,17 +220,13 @@ fn handleUpdateUser(ctx: *Context) !void {
         return;
     }
 
-    // 简化实现，实际应该解析 JSON 并更新用户
     std.debug.print("更新用户 {s}: {s}\n", .{ id_str, ctx.request.body.? });
-
-    // 模拟更新成功
     const response = try std.fmt.allocPrint(ctx.allocator, "{{\"id\":{s},\"message\":\"用户更新成功\"}}", .{id_str});
     defer ctx.allocator.free(response);
 
     try ctx.json(response);
 }
 
-// 删除用户（模拟）
 fn handleDeleteUser(ctx: *Context) !void {
     const id_str = ctx.getParam("id") orelse {
         ctx.status(.bad_request);
@@ -256,39 +234,9 @@ fn handleDeleteUser(ctx: *Context) !void {
         return;
     };
 
-    // 简化实现，实际应该从数据库删除
     std.debug.print("删除用户 {s}\n", .{id_str});
-
-    // 模拟删除成功
     const response = try std.fmt.allocPrint(ctx.allocator, "{{\"id\":{s},\"message\":\"用户删除成功\"}}", .{id_str});
     defer ctx.allocator.free(response);
 
     try ctx.json(response);
-}
-
-// 静态文件处理（模拟）
-fn handleStaticFiles(ctx: *Context) !void {
-    // 在实际应用中，应该从文件系统读取文件
-    // 这里简化实现，返回模拟内容
-
-    const path = ctx.request.path;
-
-    if (std.mem.endsWith(u8, path, ".css")) {
-        try ctx.response.setHeader("Content-Type", "text/css");
-        try ctx.text("/* 这是一个模拟的 CSS 文件 */\nbody { font-family: Arial, sans-serif; }");
-    } else if (std.mem.endsWith(u8, path, ".js")) {
-        try ctx.response.setHeader("Content-Type", "application/javascript");
-        try ctx.text("// 这是一个模拟的 JavaScript 文件\nconsole.log('Hello from Zig HTTP Server!');");
-    } else if (std.mem.endsWith(u8, path, ".jpg") or std.mem.endsWith(u8, path, ".jpeg")) {
-        try ctx.response.setHeader("Content-Type", "image/jpeg");
-        ctx.status(.not_implemented);
-        try ctx.text("图片文件未实现");
-    } else if (std.mem.endsWith(u8, path, ".png")) {
-        try ctx.response.setHeader("Content-Type", "image/png");
-        ctx.status(.not_implemented);
-        try ctx.text("图片文件未实现");
-    } else {
-        try ctx.response.setHeader("Content-Type", "text/plain");
-        try ctx.text("未知的静态文件类型");
-    }
 }

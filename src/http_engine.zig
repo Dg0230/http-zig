@@ -1,5 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const ArrayList = std.ArrayList;
+const StringHashMap = std.StringHashMap;
 const net = std.net;
 const Thread = std.Thread;
 
@@ -8,18 +10,28 @@ const Router = @import("router.zig").Router;
 const HttpRequest = @import("request.zig").HttpRequest;
 const HttpResponse = @import("response.zig").HttpResponse;
 const Context = @import("context.zig").Context;
+const StatusCode = @import("context.zig").StatusCode;
 const BufferPool = @import("buffer.zig").BufferPool;
 
+/// 高性能 HTTP 服务器引擎
+/// 提供完整的 HTTP 服务器功能，包括多线程处理、缓冲区池优化、路由分发等
+/// 设计用于生产环境的高并发场景
 pub const HttpEngine = struct {
-    allocator: Allocator,
-    router: *Router,
-    buffer_pool: BufferPool,
-    config: HttpConfig,
-    running: bool,
+    allocator: Allocator, // 内存分配器
+    router: *Router, // 路由器实例
+    buffer_pool: BufferPool, // 缓冲区池，用于优化内存使用
+    config: HttpConfig, // 服务器配置
+    running: bool, // 服务器运行状态
 
     const Self = @This();
 
-    pub fn init(allocator: Allocator, config: HttpConfig) !*Self {
+    /// 使用默认配置创建引擎
+    pub fn init(allocator: Allocator) !*Self {
+        return try Self.initWithConfig(allocator, HttpConfig{});
+    }
+
+    /// 使用自定义配置创建引擎
+    pub fn initWithConfig(allocator: Allocator, config: HttpConfig) !*Self {
         const engine = try allocator.create(Self);
 
         engine.* = Self{
@@ -33,20 +45,25 @@ pub const HttpEngine = struct {
         return engine;
     }
 
+    /// 释放所有资源
     pub fn deinit(self: *Self) void {
         self.router.deinit();
         self.buffer_pool.deinit();
         self.allocator.destroy(self);
     }
 
-    pub fn listen(self: *Self, address: []const u8, port: u16) !void {
+    /// 启动服务器
+    pub fn listen(self: *Self) !void {
+        return try self.listenOn(self.config.address, self.config.port);
+    }
+
+    /// 启动服务器，指定地址和端口
+    pub fn listenOn(self: *Self, address: []const u8, port: u16) !void {
         const addr = try net.Address.parseIp(address, port);
-        var server = try net.StreamServer.init(.{
+        var server = try addr.listen(.{
             .reuse_address = true,
         });
         defer server.deinit();
-
-        try server.listen(addr);
 
         std.debug.print("HTTP 服务器正在监听 {s}:{d}\n", .{ address, port });
 
@@ -68,7 +85,6 @@ pub const HttpEngine = struct {
 
             connection_count += 1;
 
-            // 在新线程中处理连接
             const thread = Thread.spawn(.{}, handleConnectionWrapper, .{ self, connection, &connection_count }) catch |err| {
                 std.debug.print("创建线程失败: {any}\n", .{err});
                 connection.stream.close();
@@ -79,7 +95,8 @@ pub const HttpEngine = struct {
         }
     }
 
-    fn handleConnectionWrapper(self: *Self, connection: net.StreamServer.Connection, connection_count: *usize) void {
+    /// 连接处理包装器
+    fn handleConnectionWrapper(self: *Self, connection: net.Server.Connection, connection_count: *usize) void {
         defer {
             connection.stream.close();
             _ = @atomicRmw(usize, connection_count, .Sub, 1, .monotonic);
@@ -90,15 +107,11 @@ pub const HttpEngine = struct {
         };
     }
 
+    /// 处理单个连接
     fn handleConnection(self: *Self, stream: net.Stream) !void {
-        // 设置读取超时
-        try stream.setReadTimeout(self.config.read_timeout_ms * std.time.ns_per_ms);
-
-        // 从缓冲区池获取缓冲区
         const buffer = try self.buffer_pool.acquire();
         defer self.buffer_pool.release(buffer) catch {};
 
-        // 读取请求数据
         const bytes_read = try stream.read(buffer.data);
         if (bytes_read == 0) {
             return;
@@ -107,7 +120,6 @@ pub const HttpEngine = struct {
         buffer.len = bytes_read;
         const request_data = buffer.data[0..bytes_read];
 
-        // 解析请求
         var request = HttpRequest.parseFromBuffer(self.allocator, request_data) catch |err| {
             std.debug.print("解析请求失败: {any}\n", .{err});
             try self.sendErrorResponse(stream, .bad_request, "Bad Request");
@@ -115,36 +127,39 @@ pub const HttpEngine = struct {
         };
         defer request.deinit();
 
-        // 创建响应对象
-        var response = HttpResponse.init(self.allocator);
+        var response = HttpResponse{
+            .allocator = self.allocator,
+            .status = .ok,
+            .headers = StringHashMap([]const u8).init(self.allocator),
+            .body = null,
+            .cookies = ArrayList(HttpResponse.Cookie).init(self.allocator),
+        };
         defer response.deinit();
 
-        // 创建上下文
-        var ctx = try Context.init(self.allocator, &request, &response);
+        var ctx = Context.init(self.allocator, &request, &response);
         defer ctx.deinit();
-
-        // 路由处理
         self.router.handleRequest(&ctx) catch |err| {
             switch (err) {
                 error.NotFound => {
                     ctx.status(.not_found);
-                    try ctx.json("{\"error\":\"Not Found\"}");
+                    try self.sendNotFoundResponse(&ctx);
+                },
+                error.BadRequest => {
+                    ctx.status(.bad_request);
+                    try self.sendBadRequestResponse(&ctx);
                 },
                 else => {
                     std.debug.print("处理请求时出错: {any}\n", .{err});
                     ctx.status(.internal_server_error);
-                    try ctx.json("{\"error\":\"Internal Server Error\"}");
+                    try self.sendInternalErrorResponse(&ctx);
                 },
             }
         };
 
-        // 设置写入超时
-        try stream.setWriteTimeout(self.config.write_timeout_ms * std.time.ns_per_ms);
-
-        // 发送响应
         try self.sendResponse(stream, &response);
     }
 
+    /// 发送响应
     fn sendResponse(self: *Self, stream: net.Stream, response: *HttpResponse) !void {
         const response_data = try response.build();
         defer self.allocator.free(response_data);
@@ -155,8 +170,15 @@ pub const HttpEngine = struct {
         }
     }
 
-    fn sendErrorResponse(self: *Self, stream: net.Stream, status: Context.StatusCode, message: []const u8) !void {
-        var response = HttpResponse.init(self.allocator);
+    /// 发送错误响应
+    fn sendErrorResponse(self: *Self, stream: net.Stream, status: StatusCode, message: []const u8) !void {
+        var response = HttpResponse{
+            .allocator = self.allocator,
+            .status = status,
+            .headers = StringHashMap([]const u8).init(self.allocator),
+            .body = null,
+            .cookies = ArrayList(HttpResponse.Cookie).init(self.allocator),
+        };
         defer response.deinit();
 
         response.setStatus(status);
@@ -168,5 +190,155 @@ pub const HttpEngine = struct {
         try response.setBody(body);
 
         try self.sendResponse(stream, &response);
+    }
+
+    // === 错误响应处理方法 ===
+
+    /// 发送 404 页面
+    fn sendNotFoundResponse(self: *Self, ctx: *Context) !void {
+        _ = self;
+        const accept_header = ctx.request.getHeader("Accept") orelse "";
+
+        if (std.mem.indexOf(u8, accept_header, "application/json") != null) {
+            try ctx.json("{\"error\":\"Not Found\",\"message\":\"The requested resource was not found\"}");
+        } else {
+            try ctx.html(
+                \\<!DOCTYPE html>
+                \\<html>
+                \\<head>
+                \\    <meta charset="utf-8">
+                \\    <title>404 - 页面未找到</title>
+                \\    <style>
+                \\        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                \\        h1 { font-size: 36px; color: #333; }
+                \\        p { font-size: 18px; color: #666; }
+                \\        a { color: #0066cc; text-decoration: none; }
+                \\        a:hover { text-decoration: underline; }
+                \\    </style>
+                \\</head>
+                \\<body>
+                \\    <h1>404 - 页面未找到</h1>
+                \\    <p>您请求的页面不存在。</p>
+                \\    <p><a href="/">返回首页</a></p>
+                \\</body>
+                \\</html>
+            );
+        }
+    }
+
+    /// 发送 400 页面
+    fn sendBadRequestResponse(self: *Self, ctx: *Context) !void {
+        _ = self;
+        const accept_header = ctx.request.getHeader("Accept") orelse "";
+
+        if (std.mem.indexOf(u8, accept_header, "application/json") != null) {
+            try ctx.json("{\"error\":\"Bad Request\",\"message\":\"The request was malformed\"}");
+        } else {
+            try ctx.html(
+                \\<!DOCTYPE html>
+                \\<html>
+                \\<head>
+                \\    <meta charset="utf-8">
+                \\    <title>400 - 请求错误</title>
+                \\    <style>
+                \\        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                \\        h1 { font-size: 36px; color: #333; }
+                \\        p { font-size: 18px; color: #666; }
+                \\        a { color: #0066cc; text-decoration: none; }
+                \\        a:hover { text-decoration: underline; }
+                \\    </style>
+                \\</head>
+                \\<body>
+                \\    <h1>400 - 请求错误</h1>
+                \\    <p>您的请求格式不正确。</p>
+                \\    <p><a href="/">返回首页</a></p>
+                \\</body>
+                \\</html>
+            );
+        }
+    }
+
+    /// 发送 500 页面
+    fn sendInternalErrorResponse(self: *Self, ctx: *Context) !void {
+        _ = self;
+        const accept_header = ctx.request.getHeader("Accept") orelse "";
+
+        if (std.mem.indexOf(u8, accept_header, "application/json") != null) {
+            try ctx.json("{\"error\":\"Internal Server Error\",\"message\":\"An unexpected error occurred\"}");
+        } else {
+            try ctx.html(
+                \\<!DOCTYPE html>
+                \\<html>
+                \\<head>
+                \\    <meta charset="utf-8">
+                \\    <title>500 - 服务器错误</title>
+                \\    <style>
+                \\        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                \\        h1 { font-size: 36px; color: #333; }
+                \\        p { font-size: 18px; color: #666; }
+                \\        a { color: #0066cc; text-decoration: none; }
+                \\        a:hover { text-decoration: underline; }
+                \\    </style>
+                \\</head>
+                \\<body>
+                \\    <h1>500 - 服务器错误</h1>
+                \\    <p>服务器处理请求时发生错误。</p>
+                \\    <p><a href="/">返回首页</a></p>
+                \\</body>
+                \\</html>
+            );
+        }
+    }
+
+    // === 路由和中间件 ===
+
+    pub fn use(self: *Self, middleware: @import("middleware.zig").MiddlewareFn) !void {
+        try self.router.use(middleware);
+    }
+
+    pub fn get(self: *Self, pattern: []const u8, handler: @import("router.zig").HandlerFn) !void {
+        _ = try self.router.get(pattern, handler);
+    }
+
+    pub fn post(self: *Self, pattern: []const u8, handler: @import("router.zig").HandlerFn) !void {
+        _ = try self.router.post(pattern, handler);
+    }
+
+    pub fn put(self: *Self, pattern: []const u8, handler: @import("router.zig").HandlerFn) !void {
+        _ = try self.router.put(pattern, handler);
+    }
+
+    pub fn delete(self: *Self, pattern: []const u8, handler: @import("router.zig").HandlerFn) !void {
+        _ = try self.router.delete(pattern, handler);
+    }
+
+    pub fn group(self: *Self, prefix: []const u8) !*@import("router.zig").RouterGroup {
+        return try self.router.group(prefix);
+    }
+
+    pub fn stop(self: *Self) void {
+        self.running = false;
+    }
+
+    // === 配置管理 ===
+
+    pub fn setPort(self: *Self, port: u16) void {
+        self.config.port = port;
+    }
+
+    pub fn setAddress(self: *Self, address: []const u8) void {
+        self.config.address = address;
+    }
+
+    pub fn setMaxConnections(self: *Self, max_connections: usize) void {
+        self.config.max_connections = max_connections;
+    }
+
+    pub fn getConfig(self: *Self) HttpConfig {
+        return self.config;
+    }
+
+    pub fn isRunning(self: *Self) bool {
+        return self.running;
     }
 };
