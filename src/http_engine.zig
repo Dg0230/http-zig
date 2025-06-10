@@ -4,6 +4,7 @@ const ArrayList = std.ArrayList;
 const StringHashMap = std.StringHashMap;
 const net = std.net;
 const Thread = std.Thread;
+const atomic = std.atomic;
 
 const HttpConfig = @import("config.zig").HttpConfig;
 const Router = @import("router.zig").Router;
@@ -13,15 +14,14 @@ const Context = @import("context.zig").Context;
 const StatusCode = @import("context.zig").StatusCode;
 const BufferPool = @import("buffer.zig").BufferPool;
 
-/// 高性能 HTTP 服务器引擎
-/// 提供完整的 HTTP 服务器功能，包括多线程处理、缓冲区池优化、路由分发等
-/// 设计用于生产环境的高并发场景
+/// HTTP服务器引擎，支持高并发和线程安全
 pub const HttpEngine = struct {
-    allocator: Allocator, // 内存分配器
-    router: *Router, // 路由器实例
-    buffer_pool: BufferPool, // 缓冲区池，用于优化内存使用
-    config: HttpConfig, // 服务器配置
-    running: bool, // 服务器运行状态
+    allocator: Allocator,
+    router: *Router,
+    buffer_pool: BufferPool,
+    config: HttpConfig,
+    running: atomic.Value(bool), // 原子运行状态
+    connection_count: atomic.Value(usize), // 原子连接计数
 
     const Self = @This();
 
@@ -39,15 +39,17 @@ pub const HttpEngine = struct {
             .router = try Router.init(allocator),
             .buffer_pool = try BufferPool.init(allocator, config.buffer_size, config.max_buffers),
             .config = config,
-            .running = false,
+            .running = atomic.Value(bool).init(false),
+            .connection_count = atomic.Value(usize).init(0),
         };
 
         return engine;
     }
 
-    /// 释放所有资源
+    /// 释放资源
     pub fn deinit(self: *Self) void {
         self.router.deinit();
+        self.allocator.destroy(self.router);
         self.buffer_pool.deinit();
         self.allocator.destroy(self);
     }
@@ -57,7 +59,7 @@ pub const HttpEngine = struct {
         return try self.listenOn(self.config.address, self.config.port);
     }
 
-    /// 启动服务器，指定地址和端口
+    /// 在指定地址和端口启动服务器
     pub fn listenOn(self: *Self, address: []const u8, port: u16) !void {
         const addr = try net.Address.parseIp(address, port);
         var server = try addr.listen(.{
@@ -67,39 +69,38 @@ pub const HttpEngine = struct {
 
         std.debug.print("HTTP 服务器正在监听 {s}:{d}\n", .{ address, port });
 
-        self.running = true;
+        self.running.store(true, .monotonic);
 
-        var connection_count: usize = 0;
-
-        while (self.running) {
+        while (self.running.load(.monotonic)) {
             const connection = server.accept() catch |err| {
                 std.debug.print("接受连接失败: {any}\n", .{err});
                 continue;
             };
 
-            if (connection_count >= self.config.max_connections) {
+            const current_connections = self.connection_count.load(.monotonic);
+            if (current_connections >= self.config.max_connections) {
                 std.debug.print("达到最大连接数，拒绝连接\n", .{});
                 connection.stream.close();
                 continue;
             }
 
-            connection_count += 1;
+            _ = self.connection_count.fetchAdd(1, .monotonic);
 
-            const thread = Thread.spawn(.{}, handleConnectionWrapper, .{ self, connection, &connection_count }) catch |err| {
+            const thread = Thread.spawn(.{}, handleConnectionWrapper, .{ self, connection }) catch |err| {
                 std.debug.print("创建线程失败: {any}\n", .{err});
                 connection.stream.close();
-                connection_count -= 1;
+                _ = self.connection_count.fetchSub(1, .monotonic);
                 continue;
             };
             thread.detach();
         }
     }
 
-    /// 连接处理包装器
-    fn handleConnectionWrapper(self: *Self, connection: net.Server.Connection, connection_count: *usize) void {
+    /// 连接处理包装
+    fn handleConnectionWrapper(self: *Self, connection: net.Server.Connection) void {
         defer {
             connection.stream.close();
-            _ = @atomicRmw(usize, connection_count, .Sub, 1, .monotonic);
+            _ = self.connection_count.fetchSub(1, .monotonic);
         }
 
         self.handleConnection(connection.stream) catch |err| {
@@ -107,7 +108,7 @@ pub const HttpEngine = struct {
         };
     }
 
-    /// 处理单个连接
+    /// 处理连接
     fn handleConnection(self: *Self, stream: net.Stream) !void {
         const buffer = try self.buffer_pool.acquire();
         defer self.buffer_pool.release(buffer) catch {};
@@ -317,7 +318,7 @@ pub const HttpEngine = struct {
     }
 
     pub fn stop(self: *Self) void {
-        self.running = false;
+        self.running.store(false, .monotonic);
     }
 
     // === 配置管理 ===
@@ -339,6 +340,16 @@ pub const HttpEngine = struct {
     }
 
     pub fn isRunning(self: *Self) bool {
-        return self.running;
+        return self.running.load(.monotonic);
+    }
+
+    /// 获取连接数
+    pub fn getConnectionCount(self: *Self) usize {
+        return self.connection_count.load(.monotonic);
+    }
+
+    /// 获取缓冲区池统计
+    pub fn getBufferPoolStats(self: *Self) @import("buffer.zig").BufferPoolStats {
+        return self.buffer_pool.getStats();
     }
 };

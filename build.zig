@@ -43,4 +43,15 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+
+    // 添加性能测试步骤
+    const perf_tests = b.addTest(.{
+        .root_source_file = b.path("src/test_performance.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_perf_tests = b.addRunArtifact(perf_tests);
+    const perf_step = b.step("test-perf", "Run performance tests");
+    perf_step.dependOn(&run_perf_tests.step);
 }

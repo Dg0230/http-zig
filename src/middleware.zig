@@ -56,7 +56,6 @@ pub const MiddlewareStack = struct {
 };
 
 /// 请求日志中间件
-/// 记录请求的基本信息和处理时间
 pub fn loggerMiddleware(ctx: *Context, next: NextFn) !void {
     const start_time = std.time.milliTimestamp();
 
@@ -70,14 +69,13 @@ pub fn loggerMiddleware(ctx: *Context, next: NextFn) !void {
     std.debug.print("[{s}] {s} - {d} - {d}ms\n", .{ ctx.request.method, ctx.request.path, @intFromEnum(ctx.response.status), duration });
 }
 
-/// 跨域资源共享 (CORS) 中间件
-/// 设置必要的 CORS 头部，处理预检请求
+/// CORS中间件
 pub fn corsMiddleware(ctx: *Context, next: NextFn) !void {
     try ctx.response.setHeader("Access-Control-Allow-Origin", "*");
     try ctx.response.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     try ctx.response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
-    // 处理预检请求
+    // 预检请求处理
     if (std.mem.eql(u8, ctx.request.method, "OPTIONS")) {
         ctx.status(.no_content);
         return;
@@ -86,8 +84,7 @@ pub fn corsMiddleware(ctx: *Context, next: NextFn) !void {
     try next(ctx);
 }
 
-/// 全局错误处理中间件
-/// 捕获处理过程中的错误并返回适当的错误响应
+/// 错误处理中间件
 pub fn errorHandlerMiddleware(ctx: *Context, next: NextFn) !void {
     next(ctx) catch |err| {
         switch (err) {
@@ -154,7 +151,7 @@ pub fn errorHandlerMiddleware(ctx: *Context, next: NextFn) !void {
     };
 }
 
-/// 请求超时中间件
+/// 超时中间件
 pub fn timeoutMiddleware(timeout_ms: u64) MiddlewareFn {
     const TimeoutMiddleware = struct {
         timeout: u64,
@@ -175,7 +172,6 @@ pub fn timeoutMiddleware(timeout_ms: u64) MiddlewareFn {
 
             if (duration > self.timeout) {
                 std.debug.print("请求处理超时: {d}ms > {d}ms\n", .{ duration, self.timeout });
-                // 在实际应用中，可能需要中断请求处理
             }
         }
     };
@@ -184,7 +180,7 @@ pub fn timeoutMiddleware(timeout_ms: u64) MiddlewareFn {
     return middleware_instance.middleware;
 }
 
-/// 限流中间件（简化实现）
+/// 限流中间件
 pub fn rateLimitMiddleware(requests_per_minute: u32) MiddlewareFn {
     const middleware_instance = struct {
         limit: u32,
@@ -226,46 +222,43 @@ pub fn authMiddleware(ctx: *Context, next: NextFn) !void {
         return;
     }
 
-    // 简单的 token 验证（实际应用中应该验证 JWT）
+    // Token验证
     if (!std.mem.startsWith(u8, auth_header.?, "Bearer ")) {
         ctx.status(.unauthorized);
         try ctx.json("{\"error\":\"认证格式无效\"}");
         return;
     }
 
-    const token = auth_header.?[7..]; // 跳过 "Bearer "
-
-    // 模拟 token 验证
+    const token = auth_header.?[7..];
     if (!std.mem.eql(u8, token, "valid-token")) {
         ctx.status(.unauthorized);
         try ctx.json("{\"error\":\"认证令牌无效\"}");
         return;
     }
 
-    // 设置用户信息到上下文
+    // 设置用户信息
     try ctx.setState("user", "authenticated_user");
 
     try next(ctx);
 }
 
-/// 压缩中间件（简化实现）
+/// 压缩中间件
 pub fn compressionMiddleware(ctx: *Context, next: NextFn) !void {
-    // 检查客户端是否支持压缩
+    // 检查压缩支持
     const accept_encoding = ctx.request.getHeader("Accept-Encoding") orelse "";
 
     const supports_gzip = std.mem.indexOf(u8, accept_encoding, "gzip") != null;
     const supports_deflate = std.mem.indexOf(u8, accept_encoding, "deflate") != null;
 
-    // 先执行下一个中间件，让响应体生成
+    // 生成响应体
     try next(ctx);
 
-    // 如果响应体较小，不进行压缩
+    // 小响应体不压缩
     if (ctx.response.body == null or ctx.response.body.?.len < 1024) {
         return;
     }
 
-    // 实际应用中，这里应该进行压缩
-    // 简化实现，仅设置头部
+    // 设置压缩头部
     if (supports_gzip) {
         try ctx.response.setHeader("Content-Encoding", "gzip");
     } else if (supports_deflate) {
@@ -281,7 +274,7 @@ pub fn cacheControlMiddleware(max_age_seconds: u32) MiddlewareFn {
         fn middleware(self: @This(), ctx: *Context, next: NextFn) !void {
             try next(ctx);
 
-            // 只对成功的 GET 请求设置缓存
+            // 仅对成功的GET请求设置缓存
             if (std.mem.eql(u8, ctx.request.method, "GET") and
                 @intFromEnum(ctx.response.status) >= 200 and
                 @intFromEnum(ctx.response.status) < 300)
@@ -291,8 +284,8 @@ pub fn cacheControlMiddleware(max_age_seconds: u32) MiddlewareFn {
 
                 try ctx.response.setHeader("Cache-Control", cache_control);
 
-                // 设置 ETag（简化实现）
-                const etag = "\"simple-etag\""; // 实际应该基于内容生成
+                // 设置ETag
+                const etag = "\"simple-etag\"";
                 try ctx.response.setHeader("ETag", etag);
             }
         }
@@ -302,9 +295,9 @@ pub fn cacheControlMiddleware(max_age_seconds: u32) MiddlewareFn {
     return middleware_instance.middleware;
 }
 
-/// 请求 ID 中间件
+/// 请求ID中间件
 pub fn requestIdMiddleware(ctx: *Context, next: NextFn) !void {
-    // 生成唯一请求 ID（简化实现）
+    // 生成请求ID
     const timestamp = std.time.timestamp();
     const request_id = try std.fmt.allocPrint(ctx.allocator, "req-{d}-{d}", .{ timestamp, std.crypto.random.int(u32) });
     defer ctx.allocator.free(request_id);

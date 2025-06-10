@@ -8,6 +8,7 @@ const test_request = @import("test_request.zig");
 const test_response = @import("test_response.zig");
 const test_router = @import("test_router.zig");
 const test_middleware = @import("test_middleware.zig");
+const test_performance = @import("test_performance.zig");
 
 // 导入源模块
 const HttpRequest = @import("request.zig").HttpRequest;
@@ -25,6 +26,7 @@ test {
     _ = test_response;
     _ = test_router;
     _ = test_middleware;
+    _ = test_performance;
 }
 
 // 集成测试示例

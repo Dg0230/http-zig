@@ -234,17 +234,51 @@ _ = try router.addRoute(.DELETE, "/api/users/{id}", deleteUser);
 - **多线程处理**: 每个连接独立处理，提高并发性能
 - **最小运行时**: 生成的二进制文件小巧高效
 
+## 性能优化建议
+
+### 🚀 已识别的优化点
+
+1. **路由匹配算法优化**
+   - 当前：线性搜索 O(n)
+   - 建议：实现前缀树(Trie)或哈希表优化到 O(log n)
+
+2. **内存管理优化**
+   - 减少JSON构建时的内存分配
+   - 优化字符串操作，减少不必要的复制
+   - 扩展缓冲区池功能
+
+3. **并发处理改进**
+   - 实现线程池替代每连接一线程
+   - 添加原子操作保证线程安全
+   - 优化连接管理机制
+
+4. **HTTP解析性能**
+   - 优化请求解析算法
+   - 减少字符串分割操作
+   - 实现零拷贝解析
+
+5. **中间件机制完善**
+   - 实现真正的链式调用
+   - 改进错误处理机制
+   - 支持异步中间件
+
 ## 开发和调试
 
 ```bash
 # 运行测试
 zig build test
 
+# 运行性能测试
+zig build test-perf
+
 # 调试模式编译
 zig build -Doptimize=Debug
 
 # 发布模式编译
 zig build -Doptimize=ReleaseFast
+
+# 性能分析
+zig build -Doptimize=ReleaseFast && ./zig-out/bin/zig-http
 ```
 
 ## 扩展功能

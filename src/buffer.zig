@@ -31,14 +31,18 @@ pub const Buffer = struct {
     }
 };
 
-/// 缓冲区池，用于减少内存分配开销
-/// 通过重用缓冲区来提高性能，特别适用于高并发场景
+/// 缓冲区池，重用缓冲区减少内存分配
 pub const BufferPool = struct {
     allocator: Allocator,
-    buffers: std.ArrayList(Buffer), // 所有缓冲区的存储
-    available: std.ArrayList(usize), // 可用缓冲区的索引列表
-    buffer_size: usize, // 每个缓冲区的大小
-    max_buffers: usize, // 池中最大缓冲区数量
+    buffers: std.ArrayList(Buffer),
+    available: std.ArrayList(usize), // 可用缓冲区索引
+    buffer_size: usize,
+    max_buffers: usize,
+
+    // 统计信息
+    total_acquired: usize,
+    total_released: usize,
+    peak_usage: usize,
 
     pub fn init(allocator: Allocator, buffer_size: usize, max_buffers: usize) !BufferPool {
         return BufferPool{
@@ -47,6 +51,9 @@ pub const BufferPool = struct {
             .available = std.ArrayList(usize).init(allocator),
             .buffer_size = buffer_size,
             .max_buffers = max_buffers,
+            .total_acquired = 0,
+            .total_released = 0,
+            .peak_usage = 0,
         };
     }
 
@@ -58,29 +65,34 @@ pub const BufferPool = struct {
         self.available.deinit();
     }
 
-    /// 从池中获取一个可用的缓冲区
-    /// 优先返回已存在的缓冲区，必要时创建新的缓冲区
+    /// 获取缓冲区，优先复用已有缓冲区
     pub fn acquire(self: *BufferPool) !*Buffer {
-        // 优先使用已有的可用缓冲区
+        self.total_acquired += 1;
+
         if (self.available.items.len > 0) {
             const index = self.available.pop().?;
             return &self.buffers.items[index];
         }
 
-        // 在限制范围内创建新缓冲区
         if (self.buffers.items.len < self.max_buffers) {
             const buffer = try Buffer.init(self.allocator, self.buffer_size);
             try self.buffers.append(buffer);
+
+            const current_usage = self.buffers.items.len - self.available.items.len;
+            if (current_usage > self.peak_usage) {
+                self.peak_usage = current_usage;
+            }
+
             return &self.buffers.items[self.buffers.items.len - 1];
         }
 
         return error.BufferPoolExhausted;
     }
 
-    /// 将缓冲区归还到池中以供重用
-    /// 缓冲区会被重置并标记为可用状态
+    /// 释放缓冲区回池中
     pub fn release(self: *BufferPool, buffer: *Buffer) !void {
-        // 验证缓冲区属于此池
+        self.total_released += 1;
+
         const index = blk: {
             for (self.buffers.items, 0..) |*b, i| {
                 if (b == buffer) {
@@ -90,8 +102,29 @@ pub const BufferPool = struct {
             return error.BufferNotInPool;
         };
 
-        // 清理缓冲区并标记为可用
         buffer.reset();
         try self.available.append(index);
     }
+
+    /// 获取统计信息
+    pub fn getStats(self: *BufferPool) BufferPoolStats {
+        return BufferPoolStats{
+            .total_buffers = self.buffers.items.len,
+            .available_buffers = self.available.items.len,
+            .used_buffers = self.buffers.items.len - self.available.items.len,
+            .total_acquired = self.total_acquired,
+            .total_released = self.total_released,
+            .peak_usage = self.peak_usage,
+        };
+    }
+};
+
+/// 缓冲区池统计
+pub const BufferPoolStats = struct {
+    total_buffers: usize,
+    available_buffers: usize,
+    used_buffers: usize,
+    total_acquired: usize,
+    total_released: usize,
+    peak_usage: usize,
 };

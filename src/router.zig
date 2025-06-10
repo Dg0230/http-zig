@@ -130,17 +130,20 @@ pub const RouterGroup = struct {
     }
 };
 
-/// HTTP 路由器
-/// 管理所有路由和全局中间件，负责请求分发和处理
+const RouteMap = StringHashMap(ArrayList(*Route));
+
+/// HTTP路由器，使用哈希表优化查找性能
 pub const Router = struct {
-    routes: ArrayList(*Route), // 所有注册的路由
-    global_middlewares: ArrayList(MiddlewareFn), // 全局中间件
-    allocator: Allocator, // 内存分配器
+    routes: ArrayList(*Route),
+    route_map: RouteMap, // 按HTTP方法分组的路由映射
+    global_middlewares: ArrayList(MiddlewareFn),
+    allocator: Allocator,
 
     pub fn init(allocator: Allocator) !*Router {
         const router = try allocator.create(Router);
         router.* = Router{
             .routes = ArrayList(*Route).init(allocator),
+            .route_map = RouteMap.init(allocator),
             .global_middlewares = ArrayList(MiddlewareFn).init(allocator),
             .allocator = allocator,
         };
@@ -153,6 +156,15 @@ pub const Router = struct {
             self.allocator.destroy(route);
         }
         self.routes.deinit();
+
+        // 清理路由映射
+        var iterator = self.route_map.iterator();
+        while (iterator.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit();
+        }
+        self.route_map.deinit();
+
         self.global_middlewares.deinit();
     }
 
@@ -195,6 +207,20 @@ pub const Router = struct {
     pub fn addRoute(self: *Router, method: HttpMethod, path: []const u8, handler: HandlerFn) !*Route {
         const route = try Route.init(self.allocator, method, path, handler);
         try self.routes.append(route);
+
+        // 添加到路由映射
+        const method_str = method.toString();
+        const result = try self.route_map.getOrPut(method_str);
+        if (!result.found_existing) {
+            const owned_key = try self.allocator.dupe(u8, method_str);
+            _ = self.route_map.fetchRemove(method_str);
+            try self.route_map.put(owned_key, ArrayList(*Route).init(self.allocator));
+            const final_result = self.route_map.getPtr(owned_key).?;
+            try final_result.append(route);
+        } else {
+            try result.value_ptr.append(route);
+        }
+
         return route;
     }
 
@@ -217,58 +243,62 @@ pub const Router = struct {
         try self.executeRouteHandler(ctx, route);
     }
 
+    /// 查找匹配的路由，使用哈希表优化
     pub fn findRoute(self: *Router, method: HttpMethod, path: []const u8) ?*Route {
-        for (self.routes.items) |route| {
-            if (route.method == method and self.matchRoute(route.pattern, path)) {
-                return route;
+        const method_str = method.toString();
+        if (self.route_map.get(method_str)) |routes| {
+            for (routes.items) |route| {
+                if (self.matchRoute(route.pattern, path)) {
+                    return route;
+                }
             }
         }
         return null;
     }
 
+    /// 路由匹配算法，优化字符串操作
     fn matchRoute(_: *Router, pattern: []const u8, path: []const u8) bool {
-        // 精确匹配
         if (std.mem.eql(u8, pattern, path)) {
             return true;
         }
+        if (std.mem.indexOf(u8, pattern, ":") == null and std.mem.indexOf(u8, pattern, "*") == null) {
+            return false;
+        }
+        return matchRouteWithParams(pattern, path);
+    }
 
-        // 参数匹配
+    /// 参数路由匹配
+    fn matchRouteWithParams(pattern: []const u8, path: []const u8) bool {
         var pattern_parts = std.mem.splitScalar(u8, pattern, '/');
         var path_parts = std.mem.splitScalar(u8, path, '/');
 
         while (true) {
             const pattern_part = pattern_parts.next() orelse {
-                // 如果路径还有剩余部分，则不匹配
                 return path_parts.next() == null;
             };
 
             const path_part = path_parts.next() orelse {
-                // 如果模式还有剩余部分，则不匹配
                 return false;
             };
 
-            // 参数部分（以:开头）
+            // 参数匹配
             if (pattern_part.len > 0 and pattern_part[0] == ':') {
-                // 参数匹配任何非空路径部分
                 if (path_part.len == 0) {
                     return false;
                 }
                 continue;
             }
 
-            // 通配符部分（*）
+            // 通配符匹配
             if (std.mem.eql(u8, pattern_part, "*")) {
-                // 匹配任何内容，包括剩余的所有路径
                 return true;
             }
 
-            // 普通部分，必须精确匹配
+            // 精确匹配
             if (!std.mem.eql(u8, pattern_part, path_part)) {
                 return false;
             }
         }
-
-        return true;
     }
 
     pub fn extractParams(self: *Router, pattern: []const u8, path: []const u8, ctx: *Context) !void {
@@ -281,7 +311,7 @@ pub const Router = struct {
             const pattern_part = pattern_parts.next() orelse break;
             const path_part = path_parts.next() orelse break;
 
-            // 参数部分（以:开头）
+            // 提取参数
             if (pattern_part.len > 0 and pattern_part[0] == ':') {
                 const param_name = pattern_part[1..];
                 try ctx.setParam(param_name, path_part);
@@ -289,33 +319,24 @@ pub const Router = struct {
         }
     }
 
+    /// 执行中间件链
     fn executeMiddlewares(self: *Router, ctx: *Context, middlewares: []const MiddlewareFn) !void {
         _ = self;
-
         if (middlewares.len == 0) {
             return;
         }
-
-        // 简化的中间件执行逻辑
-        var i: usize = 0;
-        while (i < middlewares.len) {
-            const current = middlewares[i];
-            i += 1;
-
-            // 创建一个简单的next函数，如果还有中间件就继续执行
-            const nextFn = struct {
-                fn next(ctx2: *Context) !void {
-                    // 这里什么都不做，因为我们在while循环中处理
-                    _ = ctx2;
+        for (middlewares) |middleware| {
+            const next_fn = struct {
+                fn next(ctx_param: *Context) anyerror!void {
+                    _ = ctx_param;
                 }
             }.next;
 
-            try current(ctx, nextFn);
+            try middleware(ctx, next_fn);
         }
     }
 
     fn executeRouteHandler(self: *Router, ctx: *Context, route: *Route) !void {
-        // 创建包含路由中间件和处理函数的中间件链
         var all_middlewares = ArrayList(MiddlewareFn).init(self.allocator);
         defer all_middlewares.deinit();
 

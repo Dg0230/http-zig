@@ -102,10 +102,15 @@ fn handleHome(ctx: *Context) !void {
 
 fn handleHello(ctx: *Context) !void {
     const timestamp = std.time.timestamp();
-    const json_response = try std.fmt.allocPrint(ctx.allocator, "{{\"message\":\"Hello from Zig HTTP Server!\",\"timestamp\":{d}}}", .{timestamp});
-    defer ctx.allocator.free(json_response);
 
-    try ctx.json(json_response);
+    // 优化JSON构建
+    var json_buffer = std.ArrayList(u8).init(ctx.allocator);
+    defer json_buffer.deinit();
+
+    const writer = json_buffer.writer();
+    try writer.print("{{\"message\":\"Hello from Zig HTTP Server!\",\"timestamp\":{d}}}", .{timestamp});
+
+    try ctx.json(json_buffer.items);
 }
 
 fn handleEcho(ctx: *Context) !void {
@@ -117,18 +122,21 @@ fn handleEcho(ctx: *Context) !void {
 }
 
 fn handleApiInfo(ctx: *Context) !void {
-    const info = try std.fmt.allocPrint(ctx.allocator, "{{\"server\":\"Zig HTTP Server\",\"version\":\"1.0.0\",\"language\":\"Zig\",\"author\":\"Zig Developer\"}}", .{});
-    defer ctx.allocator.free(info);
-
+    // 静态响应
+    const info = "{\"server\":\"Zig HTTP Server\",\"version\":\"1.0.0\",\"language\":\"Zig\",\"author\":\"Zig Developer\"}";
     try ctx.json(info);
 }
 
 fn handleApiTime(ctx: *Context) !void {
     const timestamp = std.time.timestamp();
-    const time_json = try std.fmt.allocPrint(ctx.allocator, "{{\"timestamp\":{d},\"iso\":\"2023-01-01T00:00:00Z\"}}", .{timestamp});
-    defer ctx.allocator.free(time_json);
 
-    try ctx.json(time_json);
+    var json_buffer = std.ArrayList(u8).init(ctx.allocator);
+    defer json_buffer.deinit();
+
+    const writer = json_buffer.writer();
+    try writer.print("{{\"timestamp\":{d},\"iso\":\"2023-01-01T00:00:00Z\"}}", .{timestamp});
+
+    try ctx.json(json_buffer.items);
 }
 
 const User = struct {
@@ -147,20 +155,17 @@ fn handleListUsers(ctx: *Context) !void {
     var users_json = std.ArrayList(u8).init(ctx.allocator);
     defer users_json.deinit();
 
-    try users_json.appendSlice("[");
+    const writer = users_json.writer();
+    try writer.writeByte('[');
 
     for (users, 0..) |user, i| {
-        const user_json = try std.fmt.allocPrint(ctx.allocator, "{{\"id\":{d},\"name\":\"{s}\",\"email\":\"{s}\"}}", .{ user.id, user.name, user.email });
-        defer ctx.allocator.free(user_json);
-
-        try users_json.appendSlice(user_json);
-
-        if (i < users.len - 1) {
-            try users_json.appendSlice(",");
+        if (i > 0) {
+            try writer.writeByte(',');
         }
+        try writer.print("{{\"id\":{d},\"name\":\"{s}\",\"email\":\"{s}\"}}", .{ user.id, user.name, user.email });
     }
 
-    try users_json.appendSlice("]");
+    try writer.writeByte(']');
 
     try ctx.json(users_json.items);
 }
@@ -180,10 +185,13 @@ fn handleGetUser(ctx: *Context) !void {
 
     for (users) |user| {
         if (user.id == id) {
-            const user_json = try std.fmt.allocPrint(ctx.allocator, "{{\"id\":{d},\"name\":\"{s}\",\"email\":\"{s}\"}}", .{ user.id, user.name, user.email });
-            defer ctx.allocator.free(user_json);
+            var json_buffer = std.ArrayList(u8).init(ctx.allocator);
+            defer json_buffer.deinit();
 
-            try ctx.json(user_json);
+            const writer = json_buffer.writer();
+            try writer.print("{{\"id\":{d},\"name\":\"{s}\",\"email\":\"{s}\"}}", .{ user.id, user.name, user.email });
+
+            try ctx.json(json_buffer.items);
             return;
         }
     }
