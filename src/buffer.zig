@@ -102,6 +102,13 @@ pub const BufferPool = struct {
             return error.BufferNotInPool;
         };
 
+        // 检查缓冲区是否已经在可用列表中（防止重复释放）
+        for (self.available.items) |available_index| {
+            if (available_index == index) {
+                return error.BufferAlreadyReleased;
+            }
+        }
+
         buffer.reset();
         try self.available.append(index);
     }

@@ -70,14 +70,39 @@ pub const AppConfig = struct {
 /// 从配置文件加载应用配置
 /// 目前返回默认配置，未来可扩展为从文件读取
 pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !AppConfig {
-    _ = allocator;
-    _ = path;
+    // 尝试从文件加载配置，失败时返回默认配置
+    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        switch (err) {
+            error.FileNotFound => {
+                std.debug.print("配置文件未找到，使用默认配置: {s}\n", .{path});
+                return AppConfig{};
+            },
+            else => return err,
+        }
+    };
+    defer file.close();
 
-    // 默认配置
-    return AppConfig{};
+    const file_size = try file.getEndPos();
+    if (file_size > 1024 * 1024) { // 限制配置文件大小为1MB
+        return error.ConfigFileTooLarge;
+    }
 
-    // TODO: 从文件加载配置
-    // const file = try std.fs.cwd().openFile(path, .{});
-    // defer file.close();
-    // ...
+    const contents = try allocator.alloc(u8, file_size);
+    defer allocator.free(contents);
+
+    _ = try file.readAll(contents);
+
+    // 简化的配置解析（实际项目中应使用JSON/TOML解析器）
+    var config = AppConfig{};
+
+    // 解析配置内容（这里只是示例）
+    if (std.mem.indexOf(u8, contents, "port=")) |start| {
+        const port_start = start + 5;
+        if (std.mem.indexOf(u8, contents[port_start..], "\n")) |end| {
+            const port_str = contents[port_start .. port_start + end];
+            config.http.port = std.fmt.parseInt(u16, port_str, 10) catch config.http.port;
+        }
+    }
+
+    return config;
 }

@@ -104,8 +104,18 @@ pub const HttpRequest = struct {
             const content_length = request.getContentLength();
 
             if (content_length != null and content_length.? > 0) {
-                const body_end = @min(body_start + content_length.?, buffer.len);
-                request.body = buffer[body_start..body_end];
+                // 增强边界检查
+                if (body_start >= buffer.len) {
+                    return error.InvalidRequestFormat;
+                }
+
+                const available_body_size = buffer.len - body_start;
+                const actual_body_size = @min(content_length.?, available_body_size);
+
+                if (actual_body_size > 0) {
+                    const body_end = body_start + actual_body_size;
+                    request.body = buffer[body_start..body_end];
+                }
             }
         }
 

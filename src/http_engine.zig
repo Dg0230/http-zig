@@ -77,14 +77,14 @@ pub const HttpEngine = struct {
                 continue;
             };
 
-            const current_connections = self.connection_count.load(.monotonic);
+            // 原子地检查并增加连接数，避免竞态条件
+            const current_connections = self.connection_count.fetchAdd(1, .monotonic);
             if (current_connections >= self.config.max_connections) {
                 std.debug.print("达到最大连接数，拒绝连接\n", .{});
+                _ = self.connection_count.fetchSub(1, .monotonic); // 回滚连接计数
                 connection.stream.close();
                 continue;
             }
-
-            _ = self.connection_count.fetchAdd(1, .monotonic);
 
             const thread = Thread.spawn(.{}, handleConnectionWrapper, .{ self, connection }) catch |err| {
                 std.debug.print("创建线程失败: {any}\n", .{err});
@@ -92,7 +92,10 @@ pub const HttpEngine = struct {
                 _ = self.connection_count.fetchSub(1, .monotonic);
                 continue;
             };
+
+            // 分离线程，但记录线程ID用于调试
             thread.detach();
+            std.debug.print("线程已创建并分离，当前连接数: {d}\n", .{self.connection_count.load(.monotonic)});
         }
     }
 
@@ -100,18 +103,25 @@ pub const HttpEngine = struct {
     fn handleConnectionWrapper(self: *Self, connection: net.Server.Connection) void {
         defer {
             connection.stream.close();
-            _ = self.connection_count.fetchSub(1, .monotonic);
+            const remaining_connections = self.connection_count.fetchSub(1, .monotonic) - 1;
+            std.debug.print("连接已关闭，剩余连接数: {d}\n", .{remaining_connections});
         }
 
         self.handleConnection(connection.stream) catch |err| {
             std.debug.print("处理连接时出错: {any}\n", .{err});
+            // 发送500错误响应
+            self.sendErrorResponse(connection.stream, .internal_server_error, "Internal Server Error") catch |send_err| {
+                std.debug.print("发送错误响应失败: {any}\n", .{send_err});
+            };
         };
     }
 
     /// 处理连接
     fn handleConnection(self: *Self, stream: net.Stream) !void {
         const buffer = try self.buffer_pool.acquire();
-        defer self.buffer_pool.release(buffer) catch {};
+        defer self.buffer_pool.release(buffer) catch |err| {
+            std.debug.print("警告: 缓冲区释放失败: {any}\n", .{err});
+        };
 
         const bytes_read = try stream.read(buffer.data);
         if (bytes_read == 0) {
