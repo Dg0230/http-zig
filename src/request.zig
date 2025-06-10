@@ -2,7 +2,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const StringHashMap = std.StringHashMap;
 
-/// HTTP方法枚举
+/// HTTP 请求方法枚举
+/// 定义了所有标准的 HTTP 方法
 pub const HttpMethod = enum {
     GET,
     POST,
@@ -14,7 +15,7 @@ pub const HttpMethod = enum {
     TRACE,
     CONNECT,
 
-    /// 从字符串解析HTTP方法
+    /// 将字符串转换为 HTTP 方法枚举值
     pub fn fromString(method_str: []const u8) ?HttpMethod {
         if (std.mem.eql(u8, method_str, "GET")) return .GET;
         if (std.mem.eql(u8, method_str, "POST")) return .POST;
@@ -28,7 +29,7 @@ pub const HttpMethod = enum {
         return null;
     }
 
-    /// 转换为字符串
+    /// 将 HTTP 方法枚举值转换为字符串表示
     pub fn toString(self: HttpMethod) []const u8 {
         return switch (self) {
             .GET => "GET",
@@ -44,20 +45,23 @@ pub const HttpMethod = enum {
     }
 };
 
-/// HTTP 请求结构体
+/// HTTP 请求的完整表示
+/// 包含请求行、请求头、请求体等所有信息
+/// 负责解析原始 HTTP 请求数据并提供结构化访问
 pub const HttpRequest = struct {
-    allocator: Allocator,
-    method: []const u8,
-    path: []const u8,
-    query: ?[]const u8,
-    version: []const u8,
-    headers: StringHashMap([]const u8),
-    body: ?[]const u8,
-    raw_data: []const u8,
+    allocator: Allocator, // 内存分配器
+    method: []const u8, // HTTP 方法 (GET, POST, etc.)
+    path: []const u8, // 请求路径
+    query: ?[]const u8, // 查询字符串 (可选)
+    version: []const u8, // HTTP 版本
+    headers: StringHashMap([]const u8), // 请求头映射
+    body: ?[]const u8, // 请求体 (可选)
+    raw_data: []const u8, // 原始请求数据的引用
 
     const Self = @This();
 
-    /// 从缓冲区解析 HTTP 请求
+    /// 解析原始 HTTP 请求数据
+    /// 将字节流转换为结构化的请求对象
     pub fn parseFromBuffer(allocator: Allocator, buffer: []const u8) !Self {
         var request = Self{
             .allocator = allocator,

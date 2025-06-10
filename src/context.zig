@@ -4,7 +4,8 @@ const StringHashMap = std.StringHashMap;
 const HttpRequest = @import("request.zig").HttpRequest;
 const HttpResponse = @import("response.zig").HttpResponse;
 
-/// HTTP状态码枚举
+/// HTTP 状态码枚举
+/// 包含所有标准的 HTTP 状态码，按类别组织
 pub const StatusCode = enum(u16) {
     // 1xx - 信息性状态码
     @"continue" = 100,
@@ -78,7 +79,7 @@ pub const StatusCode = enum(u16) {
     not_extended = 510,
     network_authentication_required = 511,
 
-    /// 获取状态码的文本描述
+    /// 将状态码转换为标准的 HTTP 状态文本
     pub fn toString(self: StatusCode) []const u8 {
         return switch (self) {
             .@"continue" => "Continue",
@@ -147,13 +148,15 @@ pub const StatusCode = enum(u16) {
     }
 };
 
-/// 请求上下文结构体
+/// HTTP 请求处理上下文
+/// 封装了请求和响应对象，提供便捷的操作方法
+/// 管理路径参数、状态数据和响应构建
 pub const Context = struct {
-    request: *HttpRequest,
-    response: *HttpResponse,
-    allocator: Allocator,
-    params: StringHashMap([]const u8),
-    state: StringHashMap([]const u8),
+    request: *HttpRequest, // HTTP 请求对象引用
+    response: *HttpResponse, // HTTP 响应对象引用
+    allocator: Allocator, // 内存分配器
+    params: StringHashMap([]const u8), // 路径参数存储
+    state: StringHashMap([]const u8), // 请求状态数据存储
 
     const Self = @This();
 

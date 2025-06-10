@@ -4,29 +4,33 @@ const ArrayList = std.ArrayList;
 const StringHashMap = std.StringHashMap;
 const StatusCode = @import("context.zig").StatusCode;
 
-/// HTTP 响应结构体
+/// HTTP 响应构建器
+/// 负责构建完整的 HTTP 响应，包括状态行、响应头、Cookie 和响应体
+/// 提供便捷的方法来设置各种响应类型（JSON、HTML、文本等）
 pub const HttpResponse = struct {
-    allocator: Allocator,
-    status: StatusCode,
-    headers: StringHashMap([]const u8),
-    body: ?[]const u8,
-    cookies: ArrayList(Cookie),
+    allocator: Allocator, // 内存分配器
+    status: StatusCode, // HTTP 状态码
+    headers: StringHashMap([]const u8), // 响应头映射
+    body: ?[]const u8, // 响应体内容
+    cookies: ArrayList(Cookie), // Cookie 列表
 
     const Self = @This();
 
-    /// Cookie 结构体
+    /// HTTP Cookie 表示
+    /// 包含 Cookie 的所有属性和安全选项
     pub const Cookie = struct {
-        name: []const u8,
-        value: []const u8,
-        path: ?[]const u8 = null,
-        domain: ?[]const u8 = null,
-        expires: ?[]const u8 = null,
-        max_age: ?i64 = null,
-        secure: bool = false,
-        http_only: bool = false,
-        same_site: ?SameSite = null,
+        name: []const u8, // Cookie 名称
+        value: []const u8, // Cookie 值
+        path: ?[]const u8 = null, // 路径限制
+        domain: ?[]const u8 = null, // 域名限制
+        expires: ?[]const u8 = null, // 过期时间
+        max_age: ?i64 = null, // 最大存活时间（秒）
+        secure: bool = false, // 仅 HTTPS 传输
+        http_only: bool = false, // 禁止 JavaScript 访问
+        same_site: ?SameSite = null, // 跨站请求策略
 
-        /// SameSite 枚举
+        /// Cookie 的 SameSite 属性
+        /// 控制 Cookie 在跨站请求中的行为
         pub const SameSite = enum {
             Strict,
             Lax,

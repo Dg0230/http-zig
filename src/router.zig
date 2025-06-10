@@ -5,16 +5,21 @@ const StringHashMap = std.StringHashMap;
 const Context = @import("context.zig").Context;
 const HttpMethod = @import("request.zig").HttpMethod;
 
+/// 路由处理函数类型定义
 pub const HandlerFn = *const fn (*Context) anyerror!void;
+/// 中间件链中下一个处理函数的类型定义
 pub const NextFn = *const fn (*Context) anyerror!void;
+/// 中间件函数类型定义
 pub const MiddlewareFn = *const fn (*Context, NextFn) anyerror!void;
 
+/// 单个路由定义
+/// 包含 HTTP 方法、路径模式、处理函数和中间件
 pub const Route = struct {
-    method: HttpMethod,
-    pattern: []const u8,
-    handler: HandlerFn,
-    middlewares: ArrayList(MiddlewareFn),
-    allocator: Allocator,
+    method: HttpMethod, // HTTP 方法
+    pattern: []const u8, // 路径模式（支持参数和通配符）
+    handler: HandlerFn, // 路由处理函数
+    middlewares: ArrayList(MiddlewareFn), // 路由级中间件
+    allocator: Allocator, // 内存分配器
 
     pub fn init(allocator: Allocator, method: HttpMethod, pattern: []const u8, handler: HandlerFn) !*Route {
         const route = try allocator.create(Route);
@@ -33,16 +38,19 @@ pub const Route = struct {
         self.middlewares.deinit();
     }
 
+    /// 为路由添加中间件
     pub fn use(self: *Route, middleware: MiddlewareFn) !void {
         try self.middlewares.append(middleware);
     }
 };
 
+/// 路由组
+/// 允许为一组路由设置共同的前缀和中间件
 pub const RouterGroup = struct {
-    router: *Router,
-    prefix: []const u8,
-    middlewares: ArrayList(MiddlewareFn),
-    allocator: Allocator,
+    router: *Router, // 所属路由器
+    prefix: []const u8, // 路径前缀
+    middlewares: ArrayList(MiddlewareFn), // 组级中间件
+    allocator: Allocator, // 内存分配器
 
     pub fn init(router: *Router, prefix: []const u8) !*RouterGroup {
         const new_group = try router.allocator.create(RouterGroup);
@@ -122,10 +130,12 @@ pub const RouterGroup = struct {
     }
 };
 
+/// HTTP 路由器
+/// 管理所有路由和全局中间件，负责请求分发和处理
 pub const Router = struct {
-    routes: ArrayList(*Route),
-    global_middlewares: ArrayList(MiddlewareFn),
-    allocator: Allocator,
+    routes: ArrayList(*Route), // 所有注册的路由
+    global_middlewares: ArrayList(MiddlewareFn), // 全局中间件
+    allocator: Allocator, // 内存分配器
 
     pub fn init(allocator: Allocator) !*Router {
         const router = try allocator.create(Router);

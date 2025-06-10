@@ -3,16 +3,18 @@ const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const Context = @import("context.zig").Context;
 
-/// 下一个中间件函数类型
+/// 中间件链中下一个处理函数的类型定义
 pub const NextFn = *const fn (*Context) anyerror!void;
 
-/// 中间件函数类型
+/// 中间件函数的类型定义
+/// 接收上下文和下一个处理函数，实现请求处理逻辑
 pub const MiddlewareFn = *const fn (*Context, NextFn) anyerror!void;
 
-/// 中间件栈
+/// 中间件执行栈
+/// 管理中间件的注册和按顺序执行
 pub const MiddlewareStack = struct {
-    allocator: Allocator,
-    middlewares: ArrayList(MiddlewareFn),
+    allocator: Allocator, // 内存分配器
+    middlewares: ArrayList(MiddlewareFn), // 中间件函数列表
 
     const Self = @This();
 
@@ -24,12 +26,12 @@ pub const MiddlewareStack = struct {
         };
     }
 
-    /// 添加中间件
+    /// 注册中间件到执行栈
     pub fn use(self: *Self, middleware: MiddlewareFn) !void {
         try self.middlewares.append(middleware);
     }
 
-    /// 执行中间件栈
+    /// 按注册顺序执行所有中间件
     pub fn execute(self: *Self, ctx: *Context) !void {
         if (self.middlewares.items.len == 0) {
             return;
@@ -53,7 +55,8 @@ pub const MiddlewareStack = struct {
     }
 };
 
-/// 日志中间件
+/// 请求日志中间件
+/// 记录请求的基本信息和处理时间
 pub fn loggerMiddleware(ctx: *Context, next: NextFn) !void {
     const start_time = std.time.milliTimestamp();
 
@@ -67,7 +70,8 @@ pub fn loggerMiddleware(ctx: *Context, next: NextFn) !void {
     std.debug.print("[{s}] {s} - {d} - {d}ms\n", .{ ctx.request.method, ctx.request.path, @intFromEnum(ctx.response.status), duration });
 }
 
-/// CORS 中间件
+/// 跨域资源共享 (CORS) 中间件
+/// 设置必要的 CORS 头部，处理预检请求
 pub fn corsMiddleware(ctx: *Context, next: NextFn) !void {
     try ctx.response.setHeader("Access-Control-Allow-Origin", "*");
     try ctx.response.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
@@ -82,7 +86,8 @@ pub fn corsMiddleware(ctx: *Context, next: NextFn) !void {
     try next(ctx);
 }
 
-/// 错误处理中间件
+/// 全局错误处理中间件
+/// 捕获处理过程中的错误并返回适当的错误响应
 pub fn errorHandlerMiddleware(ctx: *Context, next: NextFn) !void {
     next(ctx) catch |err| {
         switch (err) {
@@ -210,7 +215,8 @@ pub fn rateLimitMiddleware(requests_per_minute: u32) MiddlewareFn {
     return middleware_instance.middleware;
 }
 
-/// 认证中间件
+/// Bearer Token 认证中间件
+/// 验证请求头中的 Authorization 字段，确保用户身份合法
 pub fn authMiddleware(ctx: *Context, next: NextFn) !void {
     const auth_header = ctx.request.getHeader("Authorization");
 
