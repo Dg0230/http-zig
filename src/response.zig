@@ -60,19 +60,17 @@ pub const HttpResponse = struct {
 
     /// 设置响应头
     pub fn setHeader(self: *Self, name: []const u8, value: []const u8) !void {
+        // 如果已存在同名头部，先释放旧值
+        if (self.headers.fetchRemove(name)) |old_entry| {
+            self.allocator.free(old_entry.key);
+            self.allocator.free(old_entry.value);
+        }
+
         const name_dup = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(name_dup);
 
         const value_dup = try self.allocator.dupe(u8, value);
         errdefer self.allocator.free(value_dup);
-
-        // 如果已存在同名头部，先释放旧值
-        if (self.headers.get(name)) |old_value| {
-            const old_name = self.headers.getKey(name).?;
-            self.allocator.free(old_name);
-            self.allocator.free(old_value);
-            _ = self.headers.remove(name);
-        }
 
         try self.headers.put(name_dup, value_dup);
     }

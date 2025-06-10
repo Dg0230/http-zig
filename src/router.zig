@@ -207,7 +207,7 @@ pub const Router = struct {
         try self.executeRouteHandler(ctx, route);
     }
 
-    fn findRoute(self: *Router, method: HttpMethod, path: []const u8) ?*Route {
+    pub fn findRoute(self: *Router, method: HttpMethod, path: []const u8) ?*Route {
         for (self.routes.items) |route| {
             if (route.method == method and self.matchRoute(route.pattern, path)) {
                 return route;
@@ -261,7 +261,7 @@ pub const Router = struct {
         return true;
     }
 
-    fn extractParams(self: *Router, pattern: []const u8, path: []const u8, ctx: *Context) !void {
+    pub fn extractParams(self: *Router, pattern: []const u8, path: []const u8, ctx: *Context) !void {
         _ = self;
 
         var pattern_parts = std.mem.splitScalar(u8, pattern, '/');

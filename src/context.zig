@@ -187,6 +187,12 @@ pub const Context = struct {
 
     /// 设置路径参数
     pub fn setParam(self: *Self, key: []const u8, value: []const u8) !void {
+        // 检查是否已存在该键，如果存在则释放旧的内存
+        if (self.params.fetchRemove(key)) |old_entry| {
+            self.allocator.free(old_entry.key);
+            self.allocator.free(old_entry.value);
+        }
+
         const owned_key = try self.allocator.dupe(u8, key);
         const owned_value = try self.allocator.dupe(u8, value);
         try self.params.put(owned_key, owned_value);
@@ -199,6 +205,12 @@ pub const Context = struct {
 
     /// 设置状态
     pub fn setState(self: *Self, key: []const u8, value: []const u8) !void {
+        // 检查是否已存在该键，如果存在则释放旧的内存
+        if (self.state.fetchRemove(key)) |old_entry| {
+            self.allocator.free(old_entry.key);
+            self.allocator.free(old_entry.value);
+        }
+
         const owned_key = try self.allocator.dupe(u8, key);
         const owned_value = try self.allocator.dupe(u8, value);
         try self.state.put(owned_key, owned_value);
@@ -215,11 +227,9 @@ pub const Context = struct {
     }
 
     /// 发送JSON响应
-    pub fn json(self: *Self, data: anytype) !void {
+    pub fn json(self: *Self, data: []const u8) !void {
         try self.response.setHeader("Content-Type", "application/json");
-        const json_str = try std.json.stringifyAlloc(self.allocator, data, .{});
-        defer self.allocator.free(json_str);
-        try self.response.setBody(json_str);
+        try self.response.setBody(data);
     }
 
     /// 发送文本响应
@@ -235,8 +245,8 @@ pub const Context = struct {
     }
 
     /// 重定向
-    pub fn redirect(self: *Self, url: []const u8, status_code: StatusCode) void {
+    pub fn redirect(self: *Self, url: []const u8, status_code: StatusCode) !void {
         self.response.status = status_code;
-        self.response.setHeader("Location", url);
+        try self.response.setHeader("Location", url);
     }
 };

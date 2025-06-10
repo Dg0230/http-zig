@@ -55,7 +55,7 @@ pub const BufferPool = struct {
     pub fn acquire(self: *BufferPool) !*Buffer {
         // 如果有可用的缓冲区，返回它
         if (self.available.items.len > 0) {
-            const index = self.available.pop();
+            const index = self.available.pop().?;
             return &self.buffers.items[index];
         }
 

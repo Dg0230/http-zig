@@ -86,6 +86,7 @@ pub const HttpRequest = struct {
         };
 
         try request.parseRequestLine(request_line);
+        errdefer request.deinit();
 
         // 解析请求头
         while (lines.next()) |line| {
@@ -111,30 +112,62 @@ pub const HttpRequest = struct {
     fn parseRequestLine(self: *Self, line: []const u8) !void {
         var parts = std.mem.splitSequence(u8, line, " ");
 
-        // 解析 HTTP 方法
+        // 先验证所有部分都存在且有效
         const method = parts.next() orelse {
             return error.InvalidRequestLine;
         };
-        self.method = try self.allocator.dupe(u8, method);
+        if (method.len == 0) {
+            return error.InvalidRequestLine;
+        }
 
-        // 解析 URL 路径
         const url = parts.next() orelse {
             return error.InvalidRequestLine;
         };
+        if (url.len == 0) {
+            return error.InvalidRequestLine;
+        }
+
+        const version = parts.next() orelse {
+            return error.InvalidRequestLine;
+        };
+        if (version.len == 0) {
+            return error.InvalidRequestLine;
+        }
+
+        // 所有验证通过后，开始分配内存
+        self.method = try self.allocator.dupe(u8, method);
+        errdefer {
+            self.allocator.free(self.method);
+            self.method = "";
+        }
 
         // 检查是否有查询参数
         if (std.mem.indexOf(u8, url, "?")) |query_start| {
             self.path = try self.allocator.dupe(u8, url[0..query_start]);
+            errdefer {
+                self.allocator.free(self.path);
+                self.path = "";
+            }
             self.query = try self.allocator.dupe(u8, url[query_start + 1 ..]);
+            errdefer {
+                if (self.query) |q| {
+                    self.allocator.free(q);
+                    self.query = null;
+                }
+            }
         } else {
             self.path = try self.allocator.dupe(u8, url);
+            errdefer {
+                self.allocator.free(self.path);
+                self.path = "";
+            }
         }
 
-        // 解析 HTTP 版本
-        const version = parts.next() orelse {
-            return error.InvalidRequestLine;
-        };
         self.version = try self.allocator.dupe(u8, version);
+        errdefer {
+            self.allocator.free(self.version);
+            self.version = "";
+        }
     }
 
     /// 解析请求头行
@@ -171,11 +204,25 @@ pub const HttpRequest = struct {
 
     /// 清理资源
     pub fn deinit(self: *Self) void {
-        if (self.method.len > 0) self.allocator.free(self.method);
-        if (self.path.len > 0) self.allocator.free(self.path);
-        if (self.query) |query| self.allocator.free(query);
-        if (self.version.len > 0) self.allocator.free(self.version);
+        // 释放字符串内存（只要不是空字符串就释放）
+        if (self.method.len > 0) {
+            self.allocator.free(self.method);
+            self.method = "";
+        }
+        if (self.path.len > 0) {
+            self.allocator.free(self.path);
+            self.path = "";
+        }
+        if (self.query) |query| {
+            self.allocator.free(query);
+            self.query = null;
+        }
+        if (self.version.len > 0) {
+            self.allocator.free(self.version);
+            self.version = "";
+        }
 
+        // 释放请求头内存
         var it = self.headers.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
