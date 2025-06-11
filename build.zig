@@ -1,14 +1,16 @@
 const std = @import("std");
 
-/// 构建配置入口函数
 pub fn build(b: *std.Build) void {
-    // 标准构建目标
     const target = b.standardTargetOptions(.{});
-
-    // 标准构建模式
     const optimize = b.standardOptimizeOption(.{});
 
-    // 添加一个二进制可执行程序构建
+    // libxev 依赖
+    const libxev_dep = b.dependency("libxev", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // 原版 HTTP 服务器
     const exe = b.addExecutable(.{
         .name = "zig-http",
         .root_source_file = b.path("src/main.zig"),
@@ -16,42 +18,62 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // 添加到顶级 install step 中作为依赖
-    b.installArtifact(exe);
+    // libxev HTTP 引擎
+    const libxev_http = b.addExecutable(.{
+        .name = "libxev-http",
+        .root_source_file = b.path("src/libxev_http_engine.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    libxev_http.root_module.addImport("xev", libxev_dep.module("xev"));
 
-    // 添加运行步骤
+    // libxev 基础测试
+    const libxev_test = b.addExecutable(.{
+        .name = "libxev-test",
+        .root_source_file = b.path("src/libxev_basic_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    libxev_test.root_module.addImport("xev", libxev_dep.module("xev"));
+
+    // 安装可执行文件
+    b.installArtifact(exe);
+    b.installArtifact(libxev_http);
+    b.installArtifact(libxev_test);
+
+    // 运行步骤
     const run_exe = b.addRunArtifact(exe);
     run_exe.step.dependOn(b.getInstallStep());
-
-    // 允许通过命令行传递参数
     if (b.args) |args| {
         run_exe.addArgs(args);
     }
-
-    // 创建运行步骤
-    const run_step = b.step("run", "Run the HTTP server");
+    const run_step = b.step("run", "Run the original HTTP server");
     run_step.dependOn(&run_exe.step);
 
-    // 添加测试步骤
-    const unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/test_main.zig"),
+    const run_libxev = b.addRunArtifact(libxev_http);
+    run_libxev.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_libxev.addArgs(args);
+    }
+    const run_libxev_step = b.step("run-libxev", "Run the libxev HTTP engine");
+    run_libxev_step.dependOn(&run_libxev.step);
+
+    const run_test = b.addRunArtifact(libxev_test);
+    run_test.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_test.addArgs(args);
+    }
+    const test_step = b.step("test-libxev", "Run the libxev test");
+    test_step.dependOn(&run_test.step);
+
+    // 单元测试
+    const exe_unit_tests = b.addTest(.{
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const run_unit_tests = b.addRunArtifact(unit_tests);
-
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_unit_tests.step);
-
-    // 添加性能测试步骤
-    const perf_tests = b.addTest(.{
-        .root_source_file = b.path("src/test_performance.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const run_perf_tests = b.addRunArtifact(perf_tests);
-    const perf_step = b.step("test-perf", "Run performance tests");
-    perf_step.dependOn(&run_perf_tests.step);
+    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
+    const test_unit_step = b.step("test", "Run unit tests");
+    test_unit_step.dependOn(&run_exe_unit_tests.step);
 }

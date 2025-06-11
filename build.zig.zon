@@ -1,0 +1,17 @@
+.{
+    .name = .zig_http,
+    .version = "0.1.0",
+    .fingerprint = 0x5f12ee514120f4de,
+    .minimum_zig_version = "0.14.0",
+    .dependencies = .{
+        .libxev = .{
+            .path = "libxev",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "libxev",
+    },
+}
