@@ -63,6 +63,12 @@ pub const HttpRequest = struct {
     /// 解析原始 HTTP 请求数据
     /// 将字节流转换为结构化的请求对象
     pub fn parseFromBuffer(allocator: Allocator, buffer: []const u8) !Self {
+        const SecurityLimits = @import("security_limits.zig").SecurityLimits;
+
+        // 添加请求大小检查
+        if (buffer.len > SecurityLimits.MAX_REQUEST_SIZE) {
+            return error.RequestTooLarge;
+        }
         var request = Self{
             .allocator = allocator,
             .method = "",
@@ -124,28 +130,55 @@ pub const HttpRequest = struct {
 
     /// 解析请求行
     fn parseRequestLine(self: *Self, line: []const u8) !void {
+        const SecurityLimits = @import("security_limits.zig").SecurityLimits;
+
         var parts = std.mem.splitSequence(u8, line, " ");
 
         // 先验证所有部分都存在且有效
         const method = parts.next() orelse {
             return error.InvalidRequestLine;
         };
-        if (method.len == 0) {
+        if (method.len == 0 or method.len > SecurityLimits.MAX_METHOD_LENGTH) {
             return error.InvalidRequestLine;
         }
 
         const url = parts.next() orelse {
             return error.InvalidRequestLine;
         };
-        if (url.len == 0) {
+        if (url.len == 0 or url.len > SecurityLimits.MAX_URI_LENGTH) {
             return error.InvalidRequestLine;
         }
 
         const version = parts.next() orelse {
             return error.InvalidRequestLine;
         };
-        if (version.len == 0) {
+        if (version.len == 0 or version.len > SecurityLimits.MAX_VERSION_LENGTH) {
             return error.InvalidRequestLine;
+        }
+
+        // 验证HTTP方法
+        const valid_methods = [_][]const u8{ "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE" };
+        var method_valid = false;
+        for (valid_methods) |valid_method| {
+            if (std.mem.eql(u8, method, valid_method)) {
+                method_valid = true;
+                break;
+            }
+        }
+        if (!method_valid) {
+            return error.InvalidRequestLine;
+        }
+
+        // 验证HTTP版本格式
+        if (!std.mem.startsWith(u8, version, "HTTP/")) {
+            return error.InvalidRequestLine;
+        }
+
+        // 检查URL中的危险字符
+        for (url) |char| {
+            if (char == 0) { // 空字节注入检测
+                return error.InvalidRequestLine;
+            }
         }
 
         // 所有验证通过后，开始分配内存
@@ -186,12 +219,34 @@ pub const HttpRequest = struct {
 
     /// 解析请求头行
     fn parseHeaderLine(self: *Self, line: []const u8) !void {
+        const SecurityLimits = @import("security_limits.zig").SecurityLimits;
+
         const colon_pos = std.mem.indexOf(u8, line, ":") orelse {
             return error.InvalidHeaderLine;
         };
 
         const name = std.mem.trim(u8, line[0..colon_pos], " ");
         const value = std.mem.trim(u8, line[colon_pos + 1 ..], " ");
+
+        // 验证头部名称和值的长度
+        if (name.len == 0 or name.len > SecurityLimits.MAX_HEADER_NAME_SIZE) {
+            return error.InvalidHeaderLine;
+        }
+        if (value.len > SecurityLimits.MAX_HEADER_VALUE_SIZE) {
+            return error.InvalidHeaderLine;
+        }
+
+        // 检查CRLF注入攻击
+        for (value) |char| {
+            if (char == '\r' or char == '\n' or char == 0) {
+                return error.InvalidHeaderLine;
+            }
+        }
+
+        // 检查头部数量限制
+        if (self.headers.count() >= SecurityLimits.MAX_HEADER_COUNT) {
+            return error.TooManyHeaders;
+        }
 
         const name_dup = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(name_dup);

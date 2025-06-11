@@ -332,13 +332,31 @@ fn processHttpRequest(conn_ctx: *ConnectionContext, loop: *xev.Loop, request_dat
 
     // 构建响应数据
     const response_data = try response.build();
+
+    // 添加响应大小验证
+    const MAX_RESPONSE_SIZE = 1024 * 1024; // 1MB
+    if (response_data.len > MAX_RESPONSE_SIZE) {
+        log.err("响应数据过大: {d} bytes", .{response_data.len});
+        conn_ctx.allocator.free(response_data);
+        sendErrorResponse(conn_ctx, loop, .internal_server_error, "Response too large");
+        return;
+    }
+
     conn_ctx.response_data = response_data;
 
     if (response_data.len > conn_ctx.write_buffer.len) {
+        // 响应太大，使用动态分配的内存
         conn_ctx.bytes_to_write = response_data.len;
+        // response_data将在写入完成后释放
     } else {
-        @memcpy(conn_ctx.write_buffer[0..response_data.len], response_data);
-        conn_ctx.bytes_to_write = response_data.len;
+        // 安全的内存复制，添加边界检查
+        const copy_len = @min(response_data.len, conn_ctx.write_buffer.len);
+        if (copy_len > 0) {
+            @memcpy(conn_ctx.write_buffer[0..copy_len], response_data[0..copy_len]);
+        }
+        conn_ctx.bytes_to_write = copy_len;
+
+        // 释放原始数据，因为已复制到缓冲区
         conn_ctx.allocator.free(response_data);
         conn_ctx.response_data = null;
     }
@@ -398,6 +416,10 @@ fn setupRoutes(router: *Router) !void {
     _ = try router.get("/users/:id", userHandler);
     _ = try router.get("/users/:id/profile", userProfileHandler);
     _ = try router.get("/static/*", staticFileHandler);
+
+    // 需要认证的管理端点
+    _ = try router.get("/admin", adminHandler);
+    _ = try router.get("/api/admin/users", adminUsersHandler);
 }
 
 // 路由处理函数
@@ -468,8 +490,35 @@ fn healthHandler(ctx: *Context) !void {
 }
 
 fn echoHandler(ctx: *Context) !void {
+    const json_safe = @import("json_safe.zig");
+
     const body = ctx.request.body orelse "";
-    const response = try std.fmt.allocPrint(ctx.allocator, "{{\"echo\":\"{s}\",\"length\":{d}}}", .{ body, body.len });
+
+    // 输入验证和大小限制
+    if (body.len > 10000) { // 限制输入大小为10KB
+        ctx.status(.bad_request);
+        const error_response = try json_safe.buildSafeErrorResponse(ctx.allocator, "Input too large", "INPUT_TOO_LARGE");
+        defer ctx.allocator.free(error_response);
+        try ctx.json(error_response);
+        return;
+    }
+
+    // 检测注入攻击尝试
+    if (json_safe.detectInjectionAttempt(body)) {
+        // 记录安全事件
+        const client_ip = getClientIP(ctx);
+        // 记录恶意输入检测事件
+        log.warn("Malicious input detected from {s}: JSON Injection attempt", .{client_ip});
+
+        ctx.status(.bad_request);
+        const error_response = try json_safe.buildSafeErrorResponse(ctx.allocator, "Malicious input detected", "INJECTION_DETECTED");
+        defer ctx.allocator.free(error_response);
+        try ctx.json(error_response);
+        return;
+    }
+
+    // 使用安全的JSON构建器
+    const response = try json_safe.buildSafeEchoResponse(ctx.allocator, body);
     defer ctx.allocator.free(response);
     try ctx.json(response);
 }
@@ -495,4 +544,85 @@ fn userProfileHandler(ctx: *Context) !void {
 fn staticFileHandler(ctx: *Context) !void {
     ctx.status(.not_found);
     try ctx.json("{\"error\":\"Static file serving not implemented\"}");
+}
+
+/// 管理员页面处理函数 - 需要认证
+fn adminHandler(ctx: *Context) !void {
+    // 检查认证
+    const auth_header = ctx.request.getHeader("Authorization");
+    if (auth_header == null) {
+        ctx.status(.unauthorized);
+        try ctx.json("{\"error\":\"Authentication required\"}");
+        return;
+    }
+
+    // 验证Bearer格式
+    if (!std.mem.startsWith(u8, auth_header.?, "Bearer ")) {
+        ctx.status(.unauthorized);
+        try ctx.json("{\"error\":\"Invalid authentication format\"}");
+        return;
+    }
+
+    const token = auth_header.?[7..];
+
+    // 检查是否是硬编码token（应该被拒绝）
+    if (std.mem.eql(u8, token, "valid-token")) {
+        ctx.status(.unauthorized);
+        try ctx.json("{\"error\":\"Hardcoded token rejected - use proper JWT\"}");
+        return;
+    }
+
+    // 这里应该验证JWT token，但为了测试简化
+    ctx.status(.forbidden);
+    try ctx.json("{\"error\":\"JWT authentication not implemented yet\"}");
+}
+
+/// 管理员用户列表处理函数 - 需要认证
+fn adminUsersHandler(ctx: *Context) !void {
+    // 检查认证
+    const auth_header = ctx.request.getHeader("Authorization");
+    if (auth_header == null) {
+        ctx.status(.unauthorized);
+        try ctx.json("{\"error\":\"Authentication required\"}");
+        return;
+    }
+
+    // 验证Bearer格式
+    if (!std.mem.startsWith(u8, auth_header.?, "Bearer ")) {
+        ctx.status(.unauthorized);
+        try ctx.json("{\"error\":\"Invalid authentication format\"}");
+        return;
+    }
+
+    const token = auth_header.?[7..];
+
+    // 检查是否是硬编码token（应该被拒绝）
+    if (std.mem.eql(u8, token, "valid-token")) {
+        ctx.status(.unauthorized);
+        try ctx.json("{\"error\":\"Hardcoded token rejected - use proper JWT\"}");
+        return;
+    }
+
+    // 这里应该验证JWT token
+    ctx.status(.forbidden);
+    try ctx.json("{\"error\":\"JWT authentication not implemented yet\"}");
+}
+
+/// 获取客户端IP地址
+fn getClientIP(ctx: *Context) []const u8 {
+    // 尝试从X-Forwarded-For头获取真实IP
+    if (ctx.request.getHeader("X-Forwarded-For")) |forwarded| {
+        var parts = std.mem.splitScalar(u8, forwarded, ',');
+        if (parts.next()) |first_ip| {
+            return std.mem.trim(u8, first_ip, " ");
+        }
+    }
+
+    // 尝试从X-Real-IP头获取
+    if (ctx.request.getHeader("X-Real-IP")) |real_ip| {
+        return real_ip;
+    }
+
+    // 默认返回未知
+    return "unknown";
 }

@@ -211,35 +211,97 @@ pub fn rateLimitMiddleware(requests_per_minute: u32) MiddlewareFn {
     return middleware_instance.middleware;
 }
 
-/// Bearer Token 认证中间件
-/// 验证请求头中的 Authorization 字段，确保用户身份合法
+/// JWT认证中间件
+/// 使用安全的JWT验证替换硬编码token
+const auth_module = @import("auth.zig");
+
+// 全局认证配置和实例
+var global_jwt_auth: ?*auth_module.JWTAuth = null;
+var global_auth_mutex = std.Thread.Mutex{};
+
+/// 初始化全局JWT认证
+pub fn initGlobalAuth(allocator: std.mem.Allocator, secret_key: []const u8) !void {
+    global_auth_mutex.lock();
+    defer global_auth_mutex.unlock();
+
+    if (global_jwt_auth) |auth| {
+        allocator.destroy(auth);
+    }
+
+    const config = auth_module.AuthConfig{
+        .secret_key = secret_key,
+        .token_expiry = 3600, // 1小时
+        .issuer = "zig-http-server",
+    };
+
+    const auth = try allocator.create(auth_module.JWTAuth);
+    auth.* = auth_module.JWTAuth.init(allocator, config);
+    global_jwt_auth = auth;
+}
+
+/// 清理全局JWT认证
+pub fn deinitGlobalAuth(allocator: std.mem.Allocator) void {
+    global_auth_mutex.lock();
+    defer global_auth_mutex.unlock();
+
+    if (global_jwt_auth) |auth| {
+        allocator.destroy(auth);
+        global_jwt_auth = null;
+    }
+}
+
+/// 安全的JWT认证中间件
 pub fn authMiddleware(ctx: *Context, next: NextFn) !void {
     const auth_header = ctx.request.getHeader("Authorization");
 
     if (auth_header == null) {
         ctx.status(.unauthorized);
-        try ctx.json("{\"error\":\"缺少认证信息\"}");
+        try ctx.json("{\"error\":\"Missing authentication token\"}");
         return;
     }
 
-    // Token验证
+    // 验证Bearer格式
     if (!std.mem.startsWith(u8, auth_header.?, "Bearer ")) {
         ctx.status(.unauthorized);
-        try ctx.json("{\"error\":\"认证格式无效\"}");
+        try ctx.json("{\"error\":\"Invalid authentication format\"}");
         return;
     }
 
     const token = auth_header.?[7..];
-    if (!std.mem.eql(u8, token, "valid-token")) {
-        ctx.status(.unauthorized);
-        try ctx.json("{\"error\":\"认证令牌无效\"}");
+
+    // 使用JWT验证
+    global_auth_mutex.lock();
+    defer global_auth_mutex.unlock();
+
+    if (global_jwt_auth) |jwt_auth| {
+        var claims = jwt_auth.validateToken(token) catch |err| {
+            const error_msg = switch (err) {
+                auth_module.AuthError.ExpiredToken => "Token has expired",
+                auth_module.AuthError.InvalidSignature => "Invalid token signature",
+                auth_module.AuthError.InvalidFormat => "Invalid token format",
+                auth_module.AuthError.InvalidClaims => "Invalid token claims",
+                else => "Invalid token",
+            };
+
+            ctx.status(.unauthorized);
+            const response = try std.fmt.allocPrint(ctx.allocator, "{{\"error\":\"{s}\"}}", .{error_msg});
+            defer ctx.allocator.free(response);
+            try ctx.json(response);
+            return;
+        };
+        defer claims.deinit(ctx.allocator);
+
+        // 设置用户信息到上下文
+        try ctx.setState("user_id", claims.sub);
+        try ctx.setState("user_role", claims.role);
+        try ctx.setState("authenticated", "true");
+
+        try next(ctx);
+    } else {
+        ctx.status(.internal_server_error);
+        try ctx.json("{\"error\":\"Authentication service unavailable\"}");
         return;
     }
-
-    // 设置用户信息
-    try ctx.setState("user", "authenticated_user");
-
-    try next(ctx);
 }
 
 /// 压缩中间件

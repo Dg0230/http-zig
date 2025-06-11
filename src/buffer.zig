@@ -32,28 +32,31 @@ pub const Buffer = struct {
 };
 
 /// 缓冲区池，重用缓冲区减少内存分配
+/// 线程安全版本，使用互斥锁和原子操作
 pub const BufferPool = struct {
     allocator: Allocator,
     buffers: std.ArrayList(Buffer),
     available: std.ArrayList(usize), // 可用缓冲区索引
+    mutex: std.Thread.Mutex, // 添加互斥锁保护共享状态
     buffer_size: usize,
     max_buffers: usize,
 
-    // 统计信息
-    total_acquired: usize,
-    total_released: usize,
-    peak_usage: usize,
+    // 统计信息 - 使用原子操作
+    total_acquired: std.atomic.Value(usize),
+    total_released: std.atomic.Value(usize),
+    peak_usage: std.atomic.Value(usize),
 
     pub fn init(allocator: Allocator, buffer_size: usize, max_buffers: usize) !BufferPool {
         return BufferPool{
             .allocator = allocator,
             .buffers = std.ArrayList(Buffer).init(allocator),
             .available = std.ArrayList(usize).init(allocator),
+            .mutex = std.Thread.Mutex{},
             .buffer_size = buffer_size,
             .max_buffers = max_buffers,
-            .total_acquired = 0,
-            .total_released = 0,
-            .peak_usage = 0,
+            .total_acquired = std.atomic.Value(usize).init(0),
+            .total_released = std.atomic.Value(usize).init(0),
+            .peak_usage = std.atomic.Value(usize).init(0),
         };
     }
 
@@ -66,8 +69,14 @@ pub const BufferPool = struct {
     }
 
     /// 获取缓冲区，优先复用已有缓冲区
+    /// 线程安全版本
     pub fn acquire(self: *BufferPool) !*Buffer {
-        self.total_acquired += 1;
+        // 原子操作更新统计
+        _ = self.total_acquired.fetchAdd(1, .monotonic);
+
+        // 使用互斥锁保护共享状态
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
         if (self.available.items.len > 0) {
             const index = self.available.pop().?;
@@ -78,9 +87,18 @@ pub const BufferPool = struct {
             const buffer = try Buffer.init(self.allocator, self.buffer_size);
             try self.buffers.append(buffer);
 
-            const current_usage = self.buffers.items.len - self.available.items.len;
-            if (current_usage > self.peak_usage) {
-                self.peak_usage = current_usage;
+            // 安全计算当前使用量
+            const current_usage = if (self.buffers.items.len >= self.available.items.len)
+                self.buffers.items.len - self.available.items.len
+            else
+                0;
+
+            // 原子操作更新峰值使用量
+            var current_peak = self.peak_usage.load(.monotonic);
+            while (current_usage > current_peak) {
+                const result = self.peak_usage.cmpxchgWeak(current_peak, current_usage, .monotonic, .monotonic);
+                if (result == null) break; // 成功更新
+                current_peak = result.?; // 重试
             }
 
             return &self.buffers.items[self.buffers.items.len - 1];
@@ -90,8 +108,14 @@ pub const BufferPool = struct {
     }
 
     /// 释放缓冲区回池中
+    /// 线程安全版本
     pub fn release(self: *BufferPool, buffer: *Buffer) !void {
-        self.total_released += 1;
+        // 原子操作更新统计
+        _ = self.total_released.fetchAdd(1, .monotonic);
+
+        // 使用互斥锁保护共享状态
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
         const index = blk: {
             for (self.buffers.items, 0..) |*b, i| {
@@ -114,14 +138,23 @@ pub const BufferPool = struct {
     }
 
     /// 获取统计信息
+    /// 线程安全版本
     pub fn getStats(self: *BufferPool) BufferPoolStats {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const used_buffers = if (self.buffers.items.len >= self.available.items.len)
+            self.buffers.items.len - self.available.items.len
+        else
+            0;
+
         return BufferPoolStats{
             .total_buffers = self.buffers.items.len,
             .available_buffers = self.available.items.len,
-            .used_buffers = self.buffers.items.len - self.available.items.len,
-            .total_acquired = self.total_acquired,
-            .total_released = self.total_released,
-            .peak_usage = self.peak_usage,
+            .used_buffers = used_buffers,
+            .total_acquired = self.total_acquired.load(.monotonic),
+            .total_released = self.total_released.load(.monotonic),
+            .peak_usage = self.peak_usage.load(.monotonic),
         };
     }
 };
